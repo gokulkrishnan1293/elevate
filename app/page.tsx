@@ -1,103 +1,195 @@
-import Image from "next/image";
+'use client';
+
+import { useState, useEffect } from 'react';
+import { useRouter } from 'next/navigation';
+import useSWR from 'swr';
+import { useOktaAuth } from '@okta/okta-react'; // Import Okta Auth hook
+import type { UserClaims } from '@okta/okta-auth-js'; // Import UserClaims type
+import type { AccessToken } from '@okta/okta-auth-js'; // Import AccessToken type
+
+// Ensure this path is correct relative to your project structure
+import { ProfileApiResponse } from '@/app/complete-profile/page';
+
+// Fetcher function for SWR
+// Accepts the AccessToken object from Okta
+const fetcher = (url: string, accessToken: AccessToken | undefined | null) => {
+  if (!accessToken?.accessToken) {
+    // Handle cases where accessToken or its value is missing
+    // Depending on requirements, you might throw an error or return a specific response
+    console.error("Fetcher called without a valid access token.");
+    throw new Error("Access token is missing or invalid.");
+  }
+  return fetch(url, {
+    headers: {
+      Authorization: `Bearer ${accessToken.accessToken}`, // Use the accessToken property
+    },
+  }).then((res) => {
+    if (!res.ok) {
+      // Handle specific errors maybe?
+      if (res.status === 401) throw new Error('Not authenticated');
+      throw new Error('Failed to fetch profile status');
+    }
+    return res.json();
+  });
+};
+
+// Define an interface for the session state
+interface SessionState {
+  user: UserClaims;
+}
 
 export default function Home() {
-  return (
-    <div className="grid grid-rows-[20px_1fr_20px] items-center justify-items-center min-h-screen p-8 pb-20 gap-16 sm:p-20 font-[family-name:var(--font-geist-sans)]">
-      <main className="flex flex-col gap-[32px] row-start-2 items-center sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={180}
-          height={38}
-          priority
-        />
-        <ol className="list-inside list-decimal text-sm/6 text-center sm:text-left font-[family-name:var(--font-geist-mono)]">
-          <li className="mb-2 tracking-[-.01em]">
-            Get started by editing{" "}
-            <code className="bg-black/[.05] dark:bg-white/[.06] px-1 py-0.5 rounded font-[family-name:var(--font-geist-mono)] font-semibold">
-              app/page.tsx
-            </code>
-            .
-          </li>
-          <li className="tracking-[-.01em]">
-            Save and see your changes instantly.
-          </li>
-        </ol>
+  const { oktaAuth, authState } = useOktaAuth(); // Use Okta Auth hook
+  const router = useRouter();
+  // Use the defined interface for session state
+  const [session, setSession] = useState<SessionState | null>(null);
 
-        <div className="flex gap-4 items-center flex-col sm:flex-row">
-          <a
-            className="rounded-full border border-solid border-transparent transition-colors flex items-center justify-center bg-foreground text-background gap-2 hover:bg-[#383838] dark:hover:bg-[#ccc] font-medium text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 sm:w-auto"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
+  useEffect(() => {
+    if (authState?.isAuthenticated) {
+      // Get user info from Okta
+      oktaAuth.getUser().then((user) => {
+        setSession({ user }); // Store user info in local state
+      });
+    } else {
+      setSession(null);
+    }
+  }, [authState, oktaAuth]);
+
+  // Fetch profile status using SWR, only when authenticated
+  const { data: profileInfo, error: profileError, isLoading: profileLoading } = useSWR<ProfileApiResponse>(
+    authState?.isAuthenticated ? '/api/user/profile' : null,
+    // Pass the actual accessToken object (or null/undefined) to the updated fetcher
+    (url: string) => fetcher(url, authState?.accessToken),
+    { revalidateOnFocus: false } // Optional: prevent re-fetching on window focus
+  );
+
+  useEffect(() => {
+    // Redirect to login if unauthenticated
+    if (!authState?.isAuthenticated) {
+      console.log("Status: Unauthenticated, redirecting to login");
+      router.push('/login');
+    }
+    // Redirect to complete profile if authenticated but profile is incomplete
+    // Ensure profileInfo is loaded before checking isProfileComplete
+    // Redirect to complete profile only if authenticated, loading finished, profile exists, and it's incomplete
+    else if (authState?.isAuthenticated && !profileLoading && profileInfo && !profileInfo.isProfileComplete) {
+      console.log("Status: Authenticated, Profile Loaded & Incomplete, redirecting to complete-profile");
+      console.log(profileInfo)
+      router.push('/complete-profile');
+    } else if (authState?.isAuthenticated && profileInfo?.isProfileComplete) {
+      console.log("Status: Authenticated, Profile Complete");
+      // Stay on this page
+    } else if (authState?.isAuthenticated && !profileInfo && !profileError) {
+      console.log("Status: Authenticated, Profile loading...");
+      // Still loading profile info
+    } else if (profileError) {
+      console.error("Profile fetch error detected in useEffect:", profileError);
+      // Error state is handled below
+    } else if (authState?.isPending) {
+      console.log("Status: Auth loading...");
+      // Still loading auth state
+    }
+  }, [authState, router, profileInfo, profileError]); // Add router, profileInfo, and profileError
+
+  // --- Render Logic ---
+
+  // 1. Handle Auth Loading State
+  if (authState?.isPending) {
+    return (
+      <main className="flex min-h-screen flex-col items-center justify-center p-24">
+        <p>Loading authentication...</p>
+      </main>
+    );
+  }
+
+  // 2. Handle Unauthenticated State (Redirect should handle this, but added as fallback)
+  if (!authState?.isAuthenticated) {
+    return (
+      <main className="flex min-h-screen flex-col items-center justify-center p-24">
+        <p>Redirecting to login...</p>
+      </main>
+    );
+  }
+
+  // 3. Handle Authenticated State
+  if (authState?.isAuthenticated) {
+    // 3a. Handle Profile Loading State (while authenticated)
+    if (profileLoading) {
+      // Check profileLoading OR if profileInfo is still null/undefined
+      return (
+        <main className="flex min-h-screen flex-col items-center justify-center p-24">
+          <p>Loading user profile...</p>
+        </main>
+      );
+    }
+
+    // 3b. Handle Profile Fetch Error State
+    if (profileError) {
+      console.error("Rendering Profile fetch error:", profileError);
+      return (
+        <main className="flex min-h-screen flex-col items-center justify-center p-24">
+          <p className="text-red-500">Error loading user profile. Please try refreshing.</p>
+          <button
+            onClick={() => oktaAuth.signOut({ postLogoutRedirectUri: 'http://localhost:3000/login' })} // Use Okta SignOut
+            className="mt-4 rounded bg-red-500 px-4 py-2 text-sm font-bold text-white hover:bg-red-700"
           >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={20}
-              height={20}
-            />
-            Deploy now
-          </a>
-          <a
-            className="rounded-full border border-solid border-black/[.08] dark:border-white/[.145] transition-colors flex items-center justify-center hover:bg-[#f2f2f2] dark:hover:bg-[#1a1a1a] hover:border-transparent font-medium text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 w-full sm:w-auto md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
+            Sign Out
+          </button>
+        </main>
+      );
+    }
+
+    // 3c. Handle Profile Incomplete State (Redirect should handle this, but added as fallback)
+    // Add check for profileInfo existence before accessing its properties
+    if (profileInfo && !profileInfo.isProfileComplete) {
+      return (
+        <main className="flex min-h-screen flex-col items-center justify-center p-24">
+          <p>Redirecting to complete profile...</p>
+        </main>
+      );
+    }
+
+    // 3d. Render Dashboard Content (Authenticated AND Profile Complete)
+    return (
+      <main className="flex min-h-screen flex-col items-center justify-start p-6 md:p-12 lg:p-24">
+        <div className="z-10 w-full max-w-5xl items-center justify-between font-mono text-sm lg:flex mb-8">
+          <p className="text-lg mb-2 lg:mb-0">
+            Welcome, <span className="font-semibold">{session?.user?.name}</span>!
+            <span className="ml-4 text-xs text-gray-500">
+              ({/* Check if roles is an array before joining, otherwise display if string */})
+              {session?.user?.roles && Array.isArray(session.user.roles)
+                ? session.user.roles.join(', ')
+                : typeof session?.user?.roles === 'string'
+                ? session.user.roles
+                : ''}
+            </span>
+          </p>
+          <button
+            onClick={() => oktaAuth.signOut({ postLogoutRedirectUri: 'http://localhost:3000/login' })} // Use Okta SignOut
+            className="rounded bg-red-500 px-4 py-2 text-sm font-bold text-white hover:bg-red-700"
           >
-            Read our docs
-          </a>
+            Sign Out
+          </button>
+        </div>
+
+        <div className="w-full max-w-5xl">
+          <h1 className="text-3xl md:text-4xl font-bold mb-6 text-center lg:text-left">Elevate Dashboard</h1>
+          <p className="mt-4 text-gray-600 mb-8 text-center lg:text-left">
+            Your personalized dashboard content will go here.
+          </p>
+          <div className="bg-gray-100 p-4 rounded border border-gray-300">
+            <p className="text-gray-700">Placeholder for dashboard widgets...</p>
+            {/* Add components for Pending Feedback, Active Awards etc. based on design */}
+          </div>
         </div>
       </main>
-      <footer className="row-start-3 flex gap-[24px] flex-wrap items-center justify-center">
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/file.svg"
-            alt="File icon"
-            width={16}
-            height={16}
-          />
-          Learn
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/window.svg"
-            alt="Window icon"
-            width={16}
-            height={16}
-          />
-          Examples
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/globe.svg"
-            alt="Globe icon"
-            width={16}
-            height={16}
-          />
-          Go to nextjs.org →
-        </a>
-      </footer>
-    </div>
+    );
+  }
+
+  // Fallback for any other unexpected state
+  return (
+    <main className="flex min-h-screen flex-col items-center justify-center p-24">
+      <p>An unexpected state occurred.</p>
+    </main>
   );
 }
